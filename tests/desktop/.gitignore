@@ -1,0 +1,3 @@
+node_modules/
+.plugin.under-test.mjs
+package-lock.json

@@ -1,0 +1,13 @@
+{
+  "name": "kanban-unblock-desktop-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test plugin.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "25.0.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  }
+}
