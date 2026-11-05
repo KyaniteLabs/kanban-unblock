@@ -1,0 +1,12 @@
+{
+  "name": "kanban-unblock",
+  "label": "Unblock",
+  "description": "Blocked-card replies and clarify/input — not shell approvals",
+  "icon": "MessageSquare",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/kanban-unblock",
+    "position": "after:kanban"
+  },
+  "api": "plugin_api.py"
+}
