@@ -1,0 +1,33 @@
+name: kanban-unblock
+version: "0.1.0"
+manifest_version: 2
+description: "Kanban Unblock Pane for Hermes: answer blocked-card replies and clarify/input in place, then unblock. Adds pre_llm_call blocked-queue brief, /kanban-unblock (queue|show|reply|clarify|unblock|status|help), tools for the same, a Desktop/Dashboard pane, and a skill. Shell/code approvals are NOT in scope — install catalog needs-you for those. Disclosure — uses only public Hermes surfaces via ctx.dispatch_tool (kanban_list / kanban_show / kanban_comment / kanban_unblock); never imports hermes_cli.kanban_db; reply text and unblock actions are operator-driven; a short queue ledger lives under <HERMES_HOME>/plugin-data/kanban-unblock/; no secrets, no child processes, no telemetry."
+author: "Kyanite Labs"
+license: Apache-2.0
+homepage: https://github.com/KyaniteLabs/kanban-unblock/tree/main/plugins/kanban-unblock-hermes
+tags: [kanban, unblock, clarify, desktop, hackathon]
+requires_hermes: ">=0.21.6"
+requires_env: []
+provides_tools:
+  - kanban_unblock_queue
+  - kanban_unblock_show
+  - kanban_unblock_reply
+  - kanban_unblock_clarify
+  - kanban_unblock_go
+provides_hooks:
+  - pre_llm_call
+hooks:
+  - pre_llm_call
+config_schema:
+  inject_on_blocked_talk:
+    type: bool
+    default: true
+    description: "When true, pre_llm_call injects a blocked-queue brief if the user message mentions blocked cards / clarify / unblock."
+  max_queue:
+    type: int
+    default: 25
+    description: "Max blocked cards to surface in queue/tools."
+  allow_mutate_on_gateway:
+    type: bool
+    default: false
+    description: "When false, reply/clarify/unblock slash+tools are refused on gateway platforms unless opted in."
