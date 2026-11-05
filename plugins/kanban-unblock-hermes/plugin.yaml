@@ -1,7 +1,7 @@
 name: kanban-unblock
-version: "0.1.0"
+version: "0.2.0"
 manifest_version: 2
-description: "Kanban Unblock Pane for Hermes: answer blocked-card replies and clarify/input in place, then unblock. Adds pre_llm_call blocked-queue brief, /kanban-unblock (queue|show|reply|clarify|unblock|status|help), tools for the same, a Desktop/Dashboard pane, and a skill. Shell/code approvals are NOT in scope — install catalog needs-you for those. Disclosure — uses only public Hermes surfaces via ctx.dispatch_tool (kanban_list / kanban_show / kanban_comment / kanban_unblock); never imports hermes_cli.kanban_db; reply text and unblock actions are operator-driven; a short queue ledger lives under <HERMES_HOME>/plugin-data/kanban-unblock/; no secrets, no child processes, no telemetry."
+description: "Kanban Unblock for Hermes: answer blocked kanban cards that need human input (block_kind=needs_input) in place, then unblock. Adds a Needs-input control inside the native Desktop /kanban page (desktop/plugin.js + dashboard/plugin_api.py), /kanban-unblock (queue|show|reply|clarify|unblock|status|help), five kanban_unblock tools, a pre_llm_call queue brief, and a skill. Shell/code/capability approvals are NOT in scope and are refused — install catalog needs-you for those. Disclosure — reaches the board only through the public kanban_list / kanban_show / kanban_comment / kanban_unblock tools (ctx.dispatch_tool in the agent, the tool registry in the backend); never imports hermes_cli.kanban_db; replies and unblocks are operator-driven and refused on messaging gateways unless allow_mutate_on_gateway is set; a short action ledger + queue cache live under <HERMES_HOME>/plugin-data/kanban-unblock/; no secrets, no child processes, no telemetry."
 author: "Kyanite Labs"
 license: Apache-2.0
 homepage: https://github.com/KyaniteLabs/kanban-unblock/tree/main/plugins/kanban-unblock-hermes
@@ -26,8 +26,8 @@ config_schema:
   max_queue:
     type: int
     default: 25
-    description: "Max blocked cards to surface in queue/tools."
+    description: "Max needs_input cards to surface in queue/tools (1-100)."
   allow_mutate_on_gateway:
     type: bool
     default: false
-    description: "When false, reply/clarify/unblock slash+tools are refused on gateway platforms unless opted in."
+    description: "When false, reply/clarify/unblock are refused when the session identity (gateway ContextVars, HERMES_PLATFORM, or the calling agent platform) is a messaging gateway such as Telegram or Slack."

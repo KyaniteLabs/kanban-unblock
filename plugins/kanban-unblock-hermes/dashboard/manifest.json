@@ -1,12 +1,12 @@
 {
   "name": "kanban-unblock",
-  "label": "Unblock",
-  "description": "Blocked-card replies and clarify/input — not shell approvals",
+  "label": "Kanban Unblock",
+  "description": "Backend for the answer-in-place control inside /kanban (needs_input cards only; shell approvals via needs-you)",
   "icon": "MessageSquare",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/kanban-unblock",
-    "position": "after:kanban"
+    "hidden": true
   },
   "api": "plugin_api.py"
 }

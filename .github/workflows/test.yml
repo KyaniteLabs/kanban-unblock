@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes: [v0.21.6, v0.22.7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Hermes ${{ matrix.hermes }}
+        run: git clone --depth 1 --branch ${{ matrix.hermes }} https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes"
+      - name: Install
+        working-directory: ${{ runner.temp }}/hermes
+        run: |
+          UV_PROJECT_ENVIRONMENT="$GITHUB_WORKSPACE/.venv" uv sync --frozen --python 3.14
+          VIRTUAL_ENV="$GITHUB_WORKSPACE/.venv" uv pip install pytest fastapi httpx
+      - name: Validate plugin
+        run: .venv/bin/python -c "from pathlib import Path; from hermes_cli.plugin_validate import validate_plugin_dir as v; r=v(Path('plugins/kanban-unblock-hermes')); print(r.checks); assert all(c[1] for c in r.checks)"
+      - name: Tests
+        run: .venv/bin/python -m pytest tests -q
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - working-directory: tests/desktop
+        run: npm install --no-audit --no-fund && npm test
