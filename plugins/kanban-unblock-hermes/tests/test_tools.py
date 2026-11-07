@@ -76,7 +76,8 @@ def test_queue_falls_back_when_status_filter_unsupported(make_ctx, blocked_tasks
     ctx = make_ctx(routes={"kanban_list": route})
     out = call(ctx, "kanban_unblock_queue", {})
     assert out["ok"] is True
-    assert [name for name, _ in ctx.calls] == ["kanban_list", "kanban_list"]
+    # The two list attempts come first; any further calls are per-card reason enrichment.
+    assert [name for name, _ in ctx.calls][:2] == ["kanban_list", "kanban_list"]
     assert "status_filter" in ctx.calls[1][1]
 
 
@@ -205,3 +206,57 @@ def test_dispatch_tool_absence_is_refused(plugin):
     assert out["ok"] is False
     assert "ctx.dispatch_tool unavailable" in out["error"]
     assert "hermes_cli.kanban_db" in out["error"]
+
+
+# --- Real-Hermes payload shapes (found by the end-to-end harness) ---------------
+
+
+def test_error_only_payload_is_a_failure(make_ctx):
+    """Real kanban tools answer failure as ``{"error": ...}`` with no ``ok`` key.
+
+    Treating that as success made a dead DB read as "no blocked cards" and the hook
+    brief say so, instead of reporting the failure.
+    """
+    ctx = make_ctx(routes={"kanban_list": {"error": "unable to open database file"}})
+    out = call(ctx, "kanban_unblock_queue", {})
+    assert out["ok"] is False
+    assert "unable to open database file" in out["error"]
+
+
+def test_show_flattens_block_reason_from_events(make_ctx):
+    """kanban_show carries the reason only in the ``blocked`` audit event's payload."""
+    show_payload = {
+        "task": {"id": "T-1", "title": "Ship it", "status": "blocked"},
+        "events": [{"kind": "created", "payload": {}},
+                   {"kind": "blocked", "payload": {"reason": "which registry?", "kind": "needs_input"}}],
+        "comments": [],
+    }
+    ctx = make_ctx(routes={"kanban_show": show_payload})
+    out = call(ctx, "kanban_unblock_show", {"task_id": "T-1"})
+    assert out["ok"] is True
+    assert out["task_id"] == "T-1"
+    assert out["reason"] == "which registry?"
+    assert out["block_kind"] == "needs_input"
+    assert out["task"]["id"] == "T-1"  # raw shape preserved
+
+
+def test_queue_enriches_reason_with_one_show_per_card(make_ctx):
+    tasks = [{"id": "T-1", "title": "Ship it", "status": "blocked"}]
+    show_payload = {
+        "task": {"id": "T-1", "title": "Ship it", "status": "blocked"},
+        "events": [{"kind": "blocked", "payload": {"reason": "which registry?", "kind": "needs_input"}}],
+    }
+    ctx = make_ctx(routes={"kanban_list": {"ok": True, "tasks": tasks}, "kanban_show": show_payload})
+    out = call(ctx, "kanban_unblock_queue", {})
+    assert out["tasks"][0]["block_reason"] == "which registry?"
+    assert out["tasks"][0]["block_kind"] == "needs_input"
+    assert ctx.call_names() == ["kanban_list", "kanban_show"]
+
+
+def test_queue_enrichment_can_be_disabled(make_ctx):
+    tasks = [{"id": "T-1", "title": "Ship it", "status": "blocked"}]
+    ctx = make_ctx(config={"enrich_queue_reasons": False},
+                   routes={"kanban_list": {"ok": True, "tasks": tasks}})
+    out = call(ctx, "kanban_unblock_queue", {})
+    assert ctx.call_names() == ["kanban_list"]
+    assert "block_reason" not in out["tasks"][0]

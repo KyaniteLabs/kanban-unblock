@@ -31,3 +31,7 @@ config_schema:
     type: bool
     default: false
     description: "When false, reply/clarify/unblock slash+tools are refused on gateway platforms unless opted in."
+  enrich_queue_reasons:
+    type: bool
+    default: true
+    description: "When true, each blocked card in the queue is resolved with one kanban_show so the brief shows block kind + reason (kanban_list rows omit them). One extra read per listed card."

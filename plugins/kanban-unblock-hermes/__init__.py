@@ -28,6 +28,9 @@ DEFAULTS: Dict[str, Any] = {
     "inject_on_blocked_talk": True,
     "max_queue": 25,
     "allow_mutate_on_gateway": False,
+    # kanban_list rows carry no block kind/reason in real Hermes, so the queue
+    # resolves each listed card with one kanban_show. Off = status-only listing.
+    "enrich_queue_reasons": True,
 }
 LEDGER_MAX = 100
 
@@ -130,7 +133,7 @@ def _dispatch(tool: str, **kwargs: Any) -> Dict[str, Any]:
         return {"ok": False, "error": f"{tool} failed: {exc}"}
 
     if isinstance(raw, dict):
-        return raw if "ok" in raw else {"ok": True, "result": raw}
+        return _normalize_payload(raw)
     if isinstance(raw, str):
         text = raw.strip()
         for opener in ("{", "["):
@@ -139,7 +142,7 @@ def _dispatch(tool: str, **kwargs: Any) -> Dict[str, Any]:
                 try:
                     parsed = json.loads(text[i:])
                     if isinstance(parsed, dict):
-                        return parsed if "ok" in parsed else {"ok": True, "result": parsed}
+                        return _normalize_payload(parsed)
                     return {"ok": True, "result": parsed, "text": text[:4000]}
                 except Exception:
                     break
@@ -147,6 +150,20 @@ def _dispatch(tool: str, **kwargs: Any) -> Dict[str, Any]:
         if "error" in low or "refusing" in low or "failed" in low:
             return {"ok": False, "error": text[:2000], "text": text[:4000]}
         return {"ok": True, "text": text[:4000]}
+    return {"ok": True, "result": raw}
+
+
+def _normalize_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a kanban tool's JSON object onto the pane's ``ok`` envelope.
+
+    Real kanban tools report failure as a bare ``{"error": ...}`` payload with no ``ok``
+    key (``kanban_list`` on an unusable DB is exactly this). Treating it as success made
+    the queue read "no blocked cards" and the hook brief say so, hiding the failure.
+    """
+    if "ok" in raw:
+        return raw
+    if raw.get("error"):
+        return {"ok": False, "error": str(raw.get("error"))[:2000]}
     return {"ok": True, "result": raw}
 
 
@@ -188,6 +205,69 @@ def _is_needs_human(task: Dict[str, Any]) -> bool:
     return status == "blocked" or not status
 
 
+def _block_fields(raw: Dict[str, Any], task: Dict[str, Any]) -> tuple:
+    """``(block_kind, reason)`` from a ``kanban_show`` payload.
+
+    Real Hermes keeps the block reason in the ``blocked`` audit event's payload: neither
+    ``kanban_list`` rows nor the ``task`` object expose ``block_kind``/``block_reason``,
+    so the pane has to read the last blocked event.
+    """
+    kind = str(task.get("block_kind") or "")
+    reason = str(task.get("block_reason") or "")
+    for event in reversed(raw.get("events") or []):
+        if not isinstance(event, dict) or event.get("kind") != "blocked":
+            continue
+        payload = event.get("payload") or {}
+        if isinstance(payload, dict):
+            reason = reason or str(payload.get("reason") or "")
+            kind = kind or str(payload.get("kind") or "")
+        break
+    reason = reason or str(task.get("last_failure_error") or "")
+    return kind, reason
+
+
+def _card_view(shown: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a ``kanban_show`` result so ``reason``/``block_kind`` are top-level fields."""
+    raw = shown.get("result", shown)
+    if not isinstance(raw, dict) or not isinstance(raw.get("task"), dict):
+        return shown
+    task = raw["task"]
+    kind, reason = _block_fields(raw, task)
+    view = dict(raw)
+    view.update({
+        "ok": True,
+        "task_id": _task_id(task),
+        "title": task.get("title"),
+        "status": task.get("status"),
+        "block_kind": kind or None,
+        "reason": reason or None,
+    })
+    return view
+
+
+def _enrich_reason(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy ``block_kind``/``block_reason`` from ``kanban_show`` onto a list row.
+
+    ``kanban_list`` rows do not carry them, so the queue/brief would otherwise show
+    only "blocked" with no reason. Best effort: any failure keeps the row as-is.
+    """
+    if task.get("block_reason") or task.get("reason"):
+        return task
+    tid = _task_id(task)
+    if not tid:
+        return task
+    shown = show_card(tid)
+    if not shown.get("ok"):
+        return task
+    view = _card_view(shown)
+    merged = dict(task)
+    if view.get("block_kind"):
+        merged["block_kind"] = view["block_kind"]
+    if view.get("reason"):
+        merged["block_reason"] = view["reason"]
+    return merged
+
+
 def fetch_blocked_queue(limit: Optional[int] = None) -> Dict[str, Any]:
     lim = min(_cfg_int("max_queue"), max(1, int(limit))) if limit is not None else _cfg_int("max_queue")
     listed = _dispatch("kanban_list", status="blocked")
@@ -206,6 +286,9 @@ def fetch_blocked_queue(limit: Optional[int] = None) -> Dict[str, Any]:
         return (0 if "needs" in kind or "clarif" in kind else 1, _task_id(t))
 
     tasks = sorted(tasks, key=_rank)[:lim]
+    if _cfg("enrich_queue_reasons"):
+        tasks = [_enrich_reason(t) for t in tasks]
+        tasks = sorted(tasks, key=_rank)
     cache = {"ok": True, "count": len(tasks), "tasks": tasks, "ts": time.time()}
     _save_json(_queue_cache_path(), cache)
     return cache
@@ -218,7 +301,7 @@ def show_card(task_id: str) -> Dict[str, Any]:
     shown = _dispatch("kanban_show", task_id=tid)
     if not shown.get("ok"):
         shown = _dispatch("kanban_show", id=tid)
-    return shown
+    return _card_view(shown)
 
 
 def reply_card(task_id: str, body: str) -> Dict[str, Any]:

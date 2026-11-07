@@ -19,6 +19,7 @@ def test_defaults_dict_matches_manifest_schema(plugin):
         "inject_on_blocked_talk": True,
         "max_queue": 25,
         "allow_mutate_on_gateway": False,
+        "enrich_queue_reasons": True,
     }
 
 
