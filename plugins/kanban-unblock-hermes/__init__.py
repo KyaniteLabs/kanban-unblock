@@ -51,6 +51,14 @@ def _cfg(key: str) -> Any:
     return DEFAULTS[key] if val is None else val
 
 
+def _cfg_int(key: str) -> int:
+    """Config value as a positive int; a malformed value falls back to the default."""
+    try:
+        return max(1, int(_cfg(key)))
+    except (TypeError, ValueError):
+        return int(DEFAULTS[key])
+
+
 def _data_dir() -> Path:
     try:
         from plugins.plugin_storage import plugin_data_dir
@@ -172,9 +180,6 @@ def _is_needs_human(task: Dict[str, Any]) -> bool:
     status = str(task.get("status") or "").lower()
     kind = str(task.get("block_kind") or task.get("kind") or task.get("blocked_kind") or "").lower()
     reason = str(task.get("block_reason") or task.get("reason") or task.get("blocked_reason") or "")
-    if status and status != "blocked":
-        # still include if list already filtered
-        pass
     if kind in {"needs_input", "clarify", "human", "question"}:
         return True
     if re.search(r"needs[_\s-]?input|clarif|question|waiting (?:on|for) (?:human|user|me|reply)", reason, re.I):
@@ -184,7 +189,7 @@ def _is_needs_human(task: Dict[str, Any]) -> bool:
 
 
 def fetch_blocked_queue(limit: Optional[int] = None) -> Dict[str, Any]:
-    lim = int(limit if limit is not None else _cfg("max_queue"))
+    lim = min(_cfg_int("max_queue"), max(1, int(limit))) if limit is not None else _cfg_int("max_queue")
     listed = _dispatch("kanban_list", status="blocked")
     if not listed.get("ok"):
         # Some Hermes builds take filter differently
@@ -291,7 +296,7 @@ def pre_llm_call(query: str = "", **kwargs: Any) -> Optional[Dict[str, Any]]:
     if not cache.get("ok"):
         brief = (
             "Kanban Unblock: could not load blocked queue via public kanban_list "
-            f"({cache.get('error', 'unknown')}). No private DB imports — check Hermes >=0.21.6."
+            f"({cache.get('error', 'unknown')}). No private hermes_cli.kanban_db imports — check Hermes >=0.21.6."
         )
     else:
         brief = _format_queue(cache)
@@ -357,24 +362,127 @@ def handle_slash(args: str = "", **kwargs: Any) -> str:
 
 # --- tools ------------------------------------------------------------------
 
-def tool_queue(limit: int = 25, **kwargs: Any) -> Dict[str, Any]:
-    return fetch_blocked_queue(limit=limit)
+def _text_arg(args: Any, key: str) -> str:
+    """Read a required non-empty string argument from a tool-call dict."""
+    if not isinstance(args, dict):
+        return ""
+    val = args.get(key)
+    return val.strip() if isinstance(val, str) else ""
 
 
-def tool_show(task_id: str, **kwargs: Any) -> Dict[str, Any]:
-    return show_card(task_id)
+def _tool_result(payload: Dict[str, Any]) -> str:
+    """Tool handlers must return a string (tools.registry rejects dict results)."""
+    return json.dumps(payload, ensure_ascii=False)
 
 
-def tool_reply(task_id: str, body: str, **kwargs: Any) -> Dict[str, Any]:
-    return reply_card(task_id, body)
+def tool_queue(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    args = args if isinstance(args, dict) else {}
+    limit = args.get("limit", None)
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            return _tool_result({"ok": False, "error": "limit must be an integer"})
+        if limit < 1:
+            return _tool_result({"ok": False, "error": "limit must be >= 1"})
+    return _tool_result(fetch_blocked_queue(limit=limit))
 
 
-def tool_clarify(task_id: str, answer: str, **kwargs: Any) -> Dict[str, Any]:
-    return clarify_card(task_id, answer)
+def tool_show(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    task_id = _text_arg(args, "task_id")
+    if not task_id:
+        return _tool_result({"ok": False, "error": "task_id required"})
+    return _tool_result(show_card(task_id))
 
 
-def tool_go(task_id: str, **kwargs: Any) -> Dict[str, Any]:
-    return go_unblock(task_id)
+def tool_reply(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    task_id, body = _text_arg(args, "task_id"), _text_arg(args, "body")
+    if not task_id:
+        return _tool_result({"ok": False, "error": "task_id required"})
+    if not body:
+        return _tool_result({"ok": False, "error": "body required"})
+    return _tool_result(reply_card(task_id, body))
+
+
+def tool_clarify(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    task_id, answer = _text_arg(args, "task_id"), _text_arg(args, "answer")
+    if not task_id:
+        return _tool_result({"ok": False, "error": "task_id required"})
+    if not answer:
+        return _tool_result({"ok": False, "error": "answer required"})
+    return _tool_result(clarify_card(task_id, answer))
+
+
+def tool_go(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    task_id = _text_arg(args, "task_id")
+    if not task_id:
+        return _tool_result({"ok": False, "error": "task_id required"})
+    return _tool_result(go_unblock(task_id))
+
+
+def _schema(name: str, description: str, properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"type": "object", "properties": properties, "additionalProperties": False}
+    if required:
+        params["required"] = required
+    return {"name": name, "description": description, "parameters": params}
+
+
+_TASK_ID_PROP = {"type": "string", "description": "Kanban task id"}
+
+TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "kanban_unblock_queue": _schema(
+        "kanban_unblock_queue",
+        "List blocked kanban cards needing human reply/clarify (public kanban_list).",
+        {"limit": {"type": "integer", "description": "Max cards to return", "minimum": 1}},
+    ),
+    "kanban_unblock_show": _schema(
+        "kanban_unblock_show",
+        "Show one kanban card via public kanban_show.",
+        {"task_id": _TASK_ID_PROP},
+        ["task_id"],
+    ),
+    "kanban_unblock_reply": _schema(
+        "kanban_unblock_reply",
+        "Post a comment on a blocked card via public kanban_comment.",
+        {"task_id": _TASK_ID_PROP, "body": {"type": "string", "description": "Comment text"}},
+        ["task_id", "body"],
+    ),
+    "kanban_unblock_clarify": _schema(
+        "kanban_unblock_clarify",
+        "Post a clarify: answer comment then kanban_unblock the card.",
+        {"task_id": _TASK_ID_PROP,
+         "answer": {"type": "string", "description": "Human answer to the clarify/input question"}},
+        ["task_id", "answer"],
+    ),
+    "kanban_unblock_go": _schema(
+        "kanban_unblock_go",
+        "Unblock a card via public kanban_unblock (after a reply if needed).",
+        {"task_id": _TASK_ID_PROP},
+        ["task_id"],
+    ),
+}
+
+_TOOLS = (
+    ("kanban_unblock_queue", TOOL_SCHEMAS["kanban_unblock_queue"], tool_queue, "🗂️"),
+    ("kanban_unblock_show", TOOL_SCHEMAS["kanban_unblock_show"], tool_show, "🔎"),
+    ("kanban_unblock_reply", TOOL_SCHEMAS["kanban_unblock_reply"], tool_reply, "💬"),
+    ("kanban_unblock_clarify", TOOL_SCHEMAS["kanban_unblock_clarify"], tool_clarify, "❓"),
+    ("kanban_unblock_go", TOOL_SCHEMAS["kanban_unblock_go"], tool_go, "🔓"),
+)
+
+TOOLSET = "kanban_unblock"
+
+
+def _cli_setup(parser) -> None:
+    parser.add_argument(
+        "args", nargs="*",
+        help="queue | show <id> | reply <id> <text> | clarify <id> <answer> | unblock <id> | status | help",
+    )
+
+
+def cli_main(args=None) -> int:
+    """``hermes kanban-unblock [...]`` — same surface as the in-session slash command."""
+    argv = getattr(args, "args", None) or []
+    print(handle_slash(" ".join(argv) if argv else "queue"))
+    return 0
 
 
 # --- register ---------------------------------------------------------------
@@ -385,70 +493,21 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_llm_call", pre_llm_call)
 
+    # In-session /kanban-unblock (register_command), plus `hermes kanban-unblock` (register_cli_command).
+    ctx.register_command(
+        "kanban-unblock",
+        handler=handle_slash,
+        description="Blocked-card replies + clarify/input inside kanban (not shell approvals)",
+        args_hint="<queue|show|reply|clarify|unblock|status>",
+    )
     ctx.register_cli_command(
         name="kanban-unblock",
-        description="Blocked-card replies + clarify/input inside kanban (not shell approvals)",
-        handler=handle_slash,
+        help="Blocked-card replies + clarify/input inside kanban (not shell approvals)",
+        setup_fn=_cli_setup,
+        handler_fn=cli_main,
+        description="Answer blocked kanban cards in place, then unblock. Uses only public kanban tools.",
     )
 
-    ctx.register_tool(
-        name="kanban_unblock_queue",
-        description="List blocked kanban cards needing human reply/clarify (public kanban_list).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Max cards to return", "default": 25},
-            },
-        },
-        handler=tool_queue,
-    )
-    ctx.register_tool(
-        name="kanban_unblock_show",
-        description="Show one kanban card via public kanban_show.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Kanban task id"},
-            },
-            "required": ["task_id"],
-        },
-        handler=tool_show,
-    )
-    ctx.register_tool(
-        name="kanban_unblock_reply",
-        description="Post a comment on a blocked card via public kanban_comment.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "body": {"type": "string", "description": "Comment text"},
-            },
-            "required": ["task_id", "body"],
-        },
-        handler=tool_reply,
-    )
-    ctx.register_tool(
-        name="kanban_unblock_clarify",
-        description="Post a clarify: answer comment then kanban_unblock the card.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "answer": {"type": "string", "description": "Human answer to the clarify/input question"},
-            },
-            "required": ["task_id", "answer"],
-        },
-        handler=tool_clarify,
-    )
-    ctx.register_tool(
-        name="kanban_unblock_go",
-        description="Unblock a card via public kanban_unblock (after a reply if needed).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-            },
-            "required": ["task_id"],
-        },
-        handler=tool_go,
-    )
+    for name, schema, handler, emoji in _TOOLS:
+        ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler, emoji=emoji)
+
